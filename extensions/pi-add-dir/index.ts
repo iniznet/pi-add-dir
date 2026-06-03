@@ -7,12 +7,17 @@
  * Skills from external directories are registered natively via the
  * `resources_discover` event, making them available as `/skill:name` commands.
  *
+ * Directories are saved per-cwd so they auto-load when a new pi session
+ * starts in the same working directory.
+ *
  * Commands:
  *   /add-dir <path>     — add an external directory
  *   /add-dir            — interactive mode with suggestions
  *   /suggest-dirs       — show directory suggestions
  *   /remove-dir [path]  — remove a directory (interactive if no path)
  *   /dirs               — list all added directories
+ *   /save-dirs          — save current dirs for auto-load on this cwd
+ *   /clear-saved-dirs   — forget saved dirs for this cwd
  *
  * Tools:
  *   add_directory           — lets the LLM request adding a directory
@@ -31,6 +36,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { suggestDirectories } from "./suggestions.js";
+import {
+  loadSavedDirs,
+  saveSavedDirs,
+  replaceSavedDirs,
+  removeSavedDir,
+  clearSavedDirs,
+  hasSavedDirs,
+} from "./storage.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -364,10 +377,39 @@ export default function addDirExtension(pi: ExtensionAPI) {
     addedDirs = [];
     currentCwd = ctx.cwd;
 
+    // Auto-load saved dirs for this cwd
+    const savedDirs = loadSavedDirs(ctx.cwd);
+
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "custom") continue;
       if (entry.customType === "add-dir:state") {
         addedDirs = (entry.data as { dirs: AddedDir[] })?.dirs ?? [];
+      }
+    }
+
+    // Merge saved dirs that aren't already in session state
+    if (savedDirs.length > 0 && addedDirs.length === 0) {
+      // No session state — restore from saved dirs
+      // Validate dirs still exist before adding
+      addedDirs = savedDirs.filter(d => dirExists(d.absolutePath));
+
+      // Persist to session so the current session has the state too
+      if (addedDirs.length > 0) {
+        pi.appendEntry("add-dir:state", { dirs: addedDirs });
+      }
+
+      // Always update saved dirs to remove paths that no longer exist
+      // (even if all dirs were pruned, we need to clear the stale entries)
+      if (addedDirs.length < savedDirs.length) {
+        replaceSavedDirs(ctx.cwd, addedDirs);
+      }
+    } else if (savedDirs.length > 0 && addedDirs.length > 0) {
+      // Mix: add any saved dirs not already in session state
+      const existingPaths = new Set(addedDirs.map(d => d.absolutePath));
+      const newDirs = savedDirs.filter(d => !existingPaths.has(d.absolutePath) && dirExists(d.absolutePath));
+      if (newDirs.length > 0) {
+        addedDirs.push(...newDirs);
+        pi.appendEntry("add-dir:state", { dirs: addedDirs });
       }
     }
 
@@ -488,9 +530,14 @@ export default function addDirExtension(pi: ExtensionAPI) {
     }
 
     const label = path.basename(absolutePath);
-    addedDirs.push({ absolutePath, label, addedAt: Date.now() });
+    const newDir = { absolutePath, label, addedAt: Date.now() };
+    addedDirs.push(newDir);
     invalidateContextCache();
     persistState(cwd);
+
+    // Persist to saved dirs so they auto-load on next session in this cwd
+    saveSavedDirs(currentCwd, [newDir]);
+
     updateWidget(ctx);
 
     // Report what was found
@@ -539,6 +586,10 @@ export default function addDirExtension(pi: ExtensionAPI) {
     const removed = addedDirs.splice(idx, 1)[0];
     invalidateContextCache();
     persistState();
+
+    // Remove from saved dirs so it doesn't auto-load next time
+    removeSavedDir(currentCwd, removed.absolutePath);
+
     updateWidget(ctx);
 
     let message = `Removed ${removed.label} (${removed.absolutePath}).`;
@@ -722,8 +773,28 @@ export default function addDirExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("dirs", {
-    description: "List all external directories in this session",
-    handler: async (_args, ctx) => {
+    description: "List all external directories in this session (use --saved to view saved dirs)",
+    handler: async (args, ctx) => {
+      const showSaved = args?.trim() === "--saved";
+
+      if (showSaved) {
+        const saved = loadSavedDirs(ctx.cwd);
+        if (saved.length === 0) {
+          ctx.ui.notify("No saved directories for this cwd. Use /save-dirs to save current dirs.", "info");
+          return;
+        }
+        const lines: string[] = [`Saved directories for this cwd (${saved.length}):\n`];
+        for (const dir of saved) {
+          const exists = dirExists(dir.absolutePath);
+          lines.push(`  ${exists ? "📂" : "⚠️"} ${dir.label}`);
+          lines.push(`     ${dir.absolutePath}`);
+          if (!exists) lines.push("     (path no longer exists)");
+          lines.push("");
+        }
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
       if (addedDirs.length === 0) {
         ctx.ui.notify("No external directories added. Use /add-dir <path> to add one.", "info");
         return;
@@ -754,6 +825,36 @@ export default function addDirExtension(pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  // -----------------------------------------------------------------------
+  // Persistent directory commands
+  // -----------------------------------------------------------------------
+
+  pi.registerCommand("save-dirs", {
+    description: "Save current directories for auto-load on this cwd",
+    handler: async (_args, ctx) => {
+      if (addedDirs.length === 0) {
+        ctx.ui.notify("No directories to save. Use /add-dir first.", "info");
+        return;
+      }
+      saveSavedDirs(ctx.cwd, addedDirs);
+      ctx.ui.notify(`Saved ${addedDirs.length} director${addedDirs.length === 1 ? "y" : "ies"} for this cwd. They will auto-load on new sessions here.`, "info");
+    },
+  });
+
+  pi.registerCommand("clear-saved-dirs", {
+    description: "Forget saved directories for this cwd (won't remove from current session)",
+    handler: async (_args, ctx) => {
+      if (!hasSavedDirs(ctx.cwd)) {
+        ctx.ui.notify("No saved directories for this cwd.", "info");
+        return;
+      }
+      const ok = await ctx.ui.confirm("Clear saved dirs?", "This removes auto-load directories for this cwd. Current session is unaffected.");
+      if (!ok) return;
+      clearSavedDirs(ctx.cwd);
+      ctx.ui.notify("Cleared saved directories for this cwd.", "info");
     },
   });
 
