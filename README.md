@@ -43,6 +43,9 @@ Then `/reload` in pi.
 | `/suggest-dirs` | Show all directory suggestions with relevance scores |
 | `/remove-dir [path]` | Remove a directory (interactive picker if no path, tab-completion supported) |
 | `/dirs` | List all added directories with their detected context |
+| `/dirs --saved` | View saved directories for this cwd |
+| `/save-dirs` | Save current directories for auto-load on this cwd |
+| `/clear-saved-dirs` | Forget saved directories for this cwd |
 
 ### Examples
 
@@ -155,6 +158,26 @@ Added directories are stored in the session via `pi.appendEntry()`. When you `/r
 
 A temp file (`/tmp/pi-add-dir-<hash>.json`) is also maintained so `resources_discover` can read the directory list before the session is fully loaded. This file is automatically synced with session state and cleaned up on `session_shutdown`.
 
+### Persistent Directory Memory
+
+Directories are automatically saved per working directory. When you start a **new** pi session in the same cwd, previously added directories are automatically restored.
+
+**How it works:**
+1. When you add a directory via `/add-dir` or `add_directory`, it's saved to `~/.pi/agent/dirs/<cwdHash>.json`
+2. When a new session starts, saved dirs for that cwd are loaded and validated (stale paths pruned)
+3. When you remove a directory, it's also removed from the saved list
+4. `/save-dirs` explicitly persists the current directory list
+5. `/clear-saved-dirs` forgets all saved dirs for this cwd (with confirmation)
+6. `/dirs --saved` shows what's saved for this cwd
+
+**Storage locations:**
+
+| Path |
+|------|
+| `~/.pi/agent/dirs/<hash>.json` |
+
+Auto-load validates that each directory still exists — if a previously saved directory has been moved or deleted, it's automatically pruned from the saved list.
+
 ### Extension detection
 
 When adding a directory that contains `.pi/extensions/`, the extension detects them and shows actionable instructions:
@@ -184,6 +207,7 @@ When you add or remove a directory that contains skills, pi automatically reload
 | Skills registered as native `/skill:name` commands | External `.pi/extensions/` are not auto-loaded² |
 | Agent can read/edit/write any path | Can't change `ctx.cwd` at runtime³ |
 | Persists across session restarts | |
+| **Auto-loads saved dirs on new session** | |
 | File search across external dirs via LLM tool | |
 | Extension detection with setup instructions | |
 

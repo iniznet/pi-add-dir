@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0
+
+### Persistent Directory Memory
+
+- **feat:** Directories are now automatically saved per-cwd — when you start a new pi session in the same working directory, previously added directories are automatically restored
+- **feat:** New `/save-dirs` command — explicitly save current directories for this cwd
+- **feat:** New `/clear-saved-dirs` command — forget saved directories for this cwd (with confirmation dialog)
+- **feat:** `/dirs --saved` shows saved directories (including existence checks for paths)
+- **feat:** Auto-load validates that saved directories still exist — stale paths are pruned automatically
+- **feat:** Adding a directory now auto-saves it for the current cwd; removing a directory auto-removes it from saved dirs
+- **fix:** Saved dirs are stored in `~/.pi/agent/dirs/<hash>.json` alongside pi's own config
+
 ## 1.3.1
 
 - **fix:** `ctx.ui.select` returns the selected string, not an index — all select handlers (`/add-dir`, `/suggest-dirs`, `/remove-dir`) now use `indexOf` to find the match
